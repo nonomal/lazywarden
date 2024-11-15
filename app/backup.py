@@ -3,7 +3,7 @@ from mega import Mega
 from tqdm import tqdm
 from bitwarden_sdk import BitwardenClient, DeviceType, client_settings_from_dict
 from secrets_manager import retrieve_secrets
-from notifications import send_telegram_notification, send_discord_notification, send_slack_notification, send_email_with_attachment
+from notifications import send_telegram_notification, send_discord_notification, send_slack_notification, send_email_with_attachment, send_ntfy_notification
 from googleapiclient.http import MediaFileUpload
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
@@ -19,7 +19,8 @@ from bitwarden_client import login_bitwarden
 from botocore.client import Config
 import pytz
 from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError
-from botocore.exceptions import NoCredentialsError, PartialCredentialsError
+from botocore.exceptions import PartialCredentialsError
+from b2sdk.v2 import InMemoryAccountInfo, B2Api
 
 # Carga las variables de entorno desde el archivo .env
 load_dotenv()
@@ -682,6 +683,48 @@ def upload_file_to_storj(file_path, access_key, secret_key, storj_endpoint):
 
 # -----------------------------------------------------------------------------------------------
 
+#--------------------------------New Backblaze B2 ------------------------------------------
+def upload_file_to_backblaze(file_path, app_key_id, app_key, bucket_name="Bitwarden-Drive-Backup"):
+    
+    try:
+        # Initialize Backblaze B2 API
+        info = InMemoryAccountInfo()
+        b2_api = B2Api(info)
+        b2_api.authorize_account("production", app_key_id, app_key)
+
+        # Check if bucket exists or create it
+        try:
+            bucket = b2_api.get_bucket_by_name(bucket_name)
+            logging.info(f"Bucket '{bucket_name}' already exists in Backblaze B2.")
+        except Exception:
+            bucket = b2_api.create_bucket(bucket_name, 'allPrivate')
+            logging.info(f"Bucket '{bucket_name}' created successfully in Backblaze B2.")
+
+        # Upload file to the bucket
+        remote_file_name = os.path.basename(file_path)
+        bucket.upload_local_file(local_file=file_path, file_name=remote_file_name)
+        logging.info(f"File '{remote_file_name}' uploaded successfully to bucket '{bucket_name}' in Backblaze B2.")
+        
+        # Send notifications on successful upload
+        notification_message = f"ZIP File Uploaded and Encrypted to Backblaze B2 Successfully ✅📚🔐☁️"
+        send_telegram_notification(notification_message, os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID"))
+        send_discord_notification(notification_message, os.getenv("DISCORD_WEBHOOK_URL"))
+        send_slack_notification(notification_message, os.getenv("SLACK_WEBHOOK_URL"))
+        send_ntfy_notification(notification_message, os.getenv("NTFY_URL"))
+
+       
+
+        
+        
+    except Exception as e:
+        logging.error(f"Error uploading file to Backblaze B2: {e}")
+
+
+
+#-------------------------------------------------------------------------------
+
+
+
 def upload_file_to_pcloud(file_path, folder_path, pcloud_username, pcloud_password):
     """
     Upload a file to pCloud.
@@ -989,7 +1032,7 @@ def backup_bitwarden(env_vars, secrets, drive_service):
 
     try:
         subprocess.run(["/usr/local/bin/bw", "config", "server", secrets["BW_URL"]], check=True)
-        bw_session = login_bitwarden(secrets["BW_USERNAME"], secrets["BW_PASSWORD"], secrets["BW_TOTP_SECRET"])
+        bw_session = login_bitwarden(secrets["BW_USERNAME"], secrets["BW_PASSWORD"], secrets.get("BW_TOTP_SECRET"))
         if bw_session is None:
             logging.error(f"{Fore.RED}Failed to obtain Bitwarden session")
             return
@@ -1020,6 +1063,7 @@ def backup_bitwarden(env_vars, secrets, drive_service):
         {"description": "Uploading to Storj", "update": 10},
         {"description": "Uploading to Cloudflare R2", "update": 10},
         {"description": "Creating Vikunja Task", "update": 10},
+        {"description": "Uploading to Backblaze B2", "update": 10},
     ]
 
     with tqdm(total=130, desc=f"{Fore.GREEN}Bitwarden Backup", ncols=100, bar_format="{l_bar}%s{bar}%s{r_bar}" % (Fore.BLUE, Fore.RESET)) as pbar:
@@ -1083,6 +1127,7 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
             send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
             send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+            send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
             pbar.update(progress_stages[2]["update"])
 
             if os.path.exists(attachments_zip_filepath):
@@ -1106,10 +1151,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
                 with open(zip_filepath, "rb") as f:
                     dbx.files_upload(f.read(), f"{folder_path}/bw-backup_{timestamp}.zip")
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to Dropbox")
-                notification_message = f"ZIP File Uploaded and Encrypted to Dropbox Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to Dropbox Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[3]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to Dropbox: {e}")
@@ -1123,10 +1169,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
                 backup_folder_id = create_folder_if_not_exists(drive_service, "bitwarden-drive-backup", parent_folder_id=env_vars["GOOGLE_FOLDER_ID"])
                 upload_file_to_drive(drive_service, zip_filepath, backup_folder_id)
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to Google Drive")
-                notification_message = f"ZIP File Uploaded and Encrypted to Google Drive Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to Google Drive Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[4]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to Google Drive: {e}")
@@ -1139,10 +1186,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             try:
                 upload_file_to_pcloud(zip_filepath, "bitwarden-drive-backup", secrets["PCLOUD_USERNAME"], secrets["PCLOUD_PASSWORD"])
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to pCloud")
-                notification_message = f"ZIP File Uploaded and Encrypted to pCloud Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to pCloud Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[5]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to pCloud: {e}")
@@ -1155,10 +1203,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             try:
                 upload_file_to_mega(zip_filepath, secrets["MEGA_EMAIL"], secrets["MEGA_PASSWORD"])
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to Mega")
-                notification_message = f"ZIP File Uploaded and Encrypted to Mega Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to Mega Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[6]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to Mega: {e}")
@@ -1171,10 +1220,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             try:
                 upload_file_to_nextcloud(zip_filepath, secrets["NEXTCLOUD_URL"], secrets["NEXTCLOUD_USERNAME"], secrets["NEXTCLOUD_PASSWORD"])
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to Nextcloud")
-                notification_message = f"ZIP File Uploaded and Encrypted to Nextcloud Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to Nextcloud Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[7]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to Nextcloud: {e}")
@@ -1187,10 +1237,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             try:
                 upload_file_to_seafile(zip_filepath, secrets["SEAFILE_SERVER_URL"], secrets["SEAFILE_USERNAME"], secrets["SEAFILE_PASSWORD"])
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to Seafile")
-                notification_message = f"ZIP File Uploaded and Encrypted to Seafile Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to Seafile Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[8]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to Seafile: {e}")
@@ -1203,10 +1254,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             try:
                 upload_file_to_filebase(zip_filepath, secrets["FILEBASE_ACCESS_KEY"], secrets["FILEBASE_SECRET_KEY"], f"bw-backup_{timestamp}.zip")
                 logging.info(f"{Fore.GREEN}ZIP file uploaded to Filebase")
-                notification_message = f"ZIP File Uploaded and Encrypted to Filebase Successfully ✅📚🔐☁️"
+                notification_message = "ZIP File Uploaded and Encrypted to Filebase Successfully ✅📚🔐☁️"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[9]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error uploading to Filebase: {e}")
@@ -1238,10 +1290,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
                     send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                     send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                     send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                    send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                     pbar.update(progress_stages[10]["update"])
                 else:
                     logging.error(f"{Fore.RED}Failed to create Todoist task")
-                    notification_message = f"Failed to create Todoist task"
+                    notification_message = "Failed to create Todoist task"
             except Exception as e:
                 logging.error(f"{Fore.RED}Error creating Todoist task: {e}")
                 notification_message = f"Error creating Todoist task: {e}"
@@ -1263,10 +1316,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
                     caldav_username=secrets["CALDAV_USERNAME"],
                     caldav_password=secrets["CALDAV_PASSWORD"]
                 )
-                notification_message = f"CalDAV Event Successfully Created on Bitwarden New Backup Calendar ✅📅"
+                notification_message = "CalDAV Event Successfully Created on Bitwarden New Backup Calendar ✅📅"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 logging.info(notification_message)
                 pbar.update(progress_stages[11]["update"])
             except Exception as e:
@@ -1281,10 +1335,11 @@ def backup_bitwarden(env_vars, secrets, drive_service):
                 send_email_with_attachment(env_vars["SMTP_SERVER"], env_vars["SMTP_PORT"], env_vars["SMTP_USERNAME"], env_vars["SMTP_PASSWORD"], env_vars["SENDER_EMAIL"], env_vars["EMAIL_RECIPIENT"], 
                                         "Bitwarden Backup", f"", zip_filepath)
                 logging.info(f"{Fore.GREEN}Email with attachment sent successfully")
-                notification_message = f"ZIP File Sent and Encrypted to Email Successfully ✅📚🔐📧"
+                notification_message = "ZIP File Sent and Encrypted to Email Successfully ✅📚🔐📧"
                 send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
                 send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
                 send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+                send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
                 pbar.update(progress_stages[12]["update"])
             except Exception as e:
                 logging.error(f"{Fore.RED}Error sending email with attachment: {e}")
@@ -1292,6 +1347,30 @@ def backup_bitwarden(env_vars, secrets, drive_service):
         else:
             logging.warning(f"{Fore.YELLOW}SMTP is not configured. Sending emails will be skipped.")
             pbar.update(progress_stages[12]["update"])
+
+
+#-------------------------------------New Backblaze B2 -----------------------------------------------------
+
+# Backblaze B2 upload
+
+    if all([secrets.get("B2_APP_KEY_ID"), secrets.get("B2_APP_KEY")]):
+      try:
+        upload_file_to_backblaze(
+            zip_filepath,
+            app_key_id=secrets["B2_APP_KEY_ID"],
+            app_key=secrets["B2_APP_KEY"],
+            bucket_name="Bitwarden-Drive-Backup"
+        )
+        pbar.update(progress_stages[10]["update"])  # Actualiza la barra de progreso si usas tqdm
+      except Exception as e:
+        logging.error(f"Error uploading to Backblaze B2: {e}")
+    else:
+      logging.warning(f"Backblaze B2 is not configured. Uploads to Backblaze B2 will be skipped.")
+
+
+
+#---------------------------------------------------------------------------------------------------------------
+
 
 
    #----------------------------------- Upload to Storj -------------------------------------------------------------
@@ -1314,6 +1393,7 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
             send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
             send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+            send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
 
             
             pbar.update(progress_stages[10]["update"])
@@ -1352,6 +1432,7 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
             send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
             send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+            send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
 
             
             pbar.update(progress_stages[10]["update"])
@@ -1380,6 +1461,7 @@ def backup_bitwarden(env_vars, secrets, drive_service):
             send_telegram_notification(notification_message, env_vars["TELEGRAM_TOKEN"], env_vars["TELEGRAM_CHAT_ID"])
             send_discord_notification(notification_message, env_vars["DISCORD_WEBHOOK_URL"])
             send_slack_notification(notification_message, env_vars["SLACK_WEBHOOK_URL"])
+            send_ntfy_notification(notification_message, env_vars.get("NTFY_URL"))
 
             pbar.update(progress_stages[10]["update"])
         else:
